@@ -30,12 +30,12 @@ public class UnrealVolcEngineRuntime: ModuleRules
             );
 		
 		PrivateDependencyModuleNames.AddRange(
-			new string[]
-			{
-				"CoreUObject",
-				"Engine",
+            new string[]
+            {
+                "CoreUObject",
+                "Engine",
                 "Projects",
-				"Slate",
+                "Slate",
                 "SlateCore",
                 "Niagara",
                 "NiagaraShader",
@@ -44,7 +44,8 @@ public class UnrealVolcEngineRuntime: ModuleRules
                 "HTTP",
                 "WebSockets",
                 "AudioMixer",
-                "AudioCaptureCore"
+                "AudioCaptureCore",
+                "AudioPlatformConfiguration"
             }
             );
     }

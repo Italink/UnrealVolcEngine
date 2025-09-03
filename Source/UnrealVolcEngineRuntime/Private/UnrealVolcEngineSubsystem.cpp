@@ -21,6 +21,7 @@
 #include "Components/AudioComponent.h"
 #include "UnrealVolcEngineSettings.h"
 #include "AudioCaptureCore.h"
+#include "AudioResampler.h"
 
 TArray<uint8> GZipCompress(TArray<uint8> PayloadBytes) {
     TArray<uint8> OutCompressedData;
@@ -62,7 +63,7 @@ void UUnrealVolcEngineSubsystem::StartListening(int AutoStopTimeoutSec)
         }
     }
     if (AudioCapture->IsCapturing()) {
-        AudioCapture->StopStream();
+        AudioCapture->AbortStream();
     }
 
     AudioCapture->StartStream();
@@ -73,9 +74,97 @@ void UUnrealVolcEngineSubsystem::StopListening()
     AudioCapture->AbortStream();
 }
 
+void WriteWavFile(const FString& FilePath, const TArray<float>& InAudio, int32 SampleRate, int32 NumChannels)
+{
+    // 将 float PCM 转为 int16
+    TArray<uint8> RawData;
+    RawData.SetNum(InAudio.Num() * sizeof(int16));
+    int16* OutPtr = reinterpret_cast<int16*>(RawData.GetData());
+    for (int32 i = 0; i < InAudio.Num(); ++i)
+    {
+        float Clamped = FMath::Clamp(InAudio[i], -1.0f, 1.0f);
+        OutPtr[i] = (int16)(Clamped * 32767.0f);
+    }
+
+    // 构造wav头
+    TArray<uint8> WavData;
+    int32 DataSize = RawData.Num();
+    int32 ByteRate = SampleRate * NumChannels * sizeof(int16);
+
+    // RIFF header
+    WavData.Append((const uint8*)"RIFF", 4);
+    int32 ChunkSize = 36 + DataSize;
+    WavData.Append((uint8*)&ChunkSize, 4);
+    WavData.Append((const uint8*)"WAVE", 4);
+
+    // fmt chunk
+    WavData.Append((const uint8*)"fmt ", 4);
+    int32 SubChunk1Size = 16;
+    WavData.Append((uint8*)&SubChunk1Size, 4);
+    int16 AudioFormat = 1; // PCM
+    WavData.Append((uint8*)&AudioFormat, 2);
+    WavData.Append((uint8*)&NumChannels, 2);
+    WavData.Append((uint8*)&SampleRate, 4);
+    WavData.Append((uint8*)&ByteRate, 4);
+    int16 BlockAlign = NumChannels * sizeof(int16);
+    WavData.Append((uint8*)&BlockAlign, 2);
+    int16 BitsPerSample = 16;
+    WavData.Append((uint8*)&BitsPerSample, 2);
+
+    // data chunk
+    WavData.Append((const uint8*)"data", 4);
+    WavData.Append((uint8*)&DataSize, 4);
+    WavData.Append(RawData);
+
+    // 写文件
+    FFileHelper::SaveArrayToFile(WavData, *FilePath);
+}
+
+
 void UUnrealVolcEngineSubsystem::OnAudioCapture(const void* AudioData, int32 NumFrames, int32 InNumChannels, int32 InSampleRate, double StreamTime, bool bOverFlow)
 {
-    UE_LOG(LogTemp, Warning, TEXT("Captureing %d"), InSampleRate);
+    const float* InBuffer = static_cast<const float*>(AudioData);
+
+    float SampleRateRatio = 16000.0f / float(InSampleRate);
+
+    int32 MaxOutputFrames = FMath::CeilToInt(float(NumFrames) * SampleRateRatio) + 8;
+
+    TArray<float> OutBuffer;
+
+    OutBuffer.SetNumUninitialized(MaxOutputFrames * InNumChannels);
+
+    Audio::FResampler Resampler;
+    Resampler.Init(Audio::EResamplingMethod::BestSinc, SampleRateRatio, InNumChannels);
+
+    int32 OutNumFrames = 0;
+    Resampler.ProcessAudio(
+        const_cast<float*>(InBuffer), // 注意：ProcessAudio 不是const指针
+        NumFrames,
+        false, // bEndOfInput
+        OutBuffer.GetData(),
+        MaxOutputFrames,
+        OutNumFrames);
+
+    // OutBuffer[0 ... OutNumFrames * InNumChannels - 1] 现在是16kHz数据
+    UE_LOG(LogTemp, Log, TEXT("Resample success, output frames: %d"), OutNumFrames);
+
+    static TArray<float> AudioCache;
+    static bool bSaved = false;
+    if (bSaved) return; // 只保存一次
+    int32 NumOutSamples = OutNumFrames * InNumChannels;
+    AudioCache.Append(OutBuffer.GetData(), NumOutSamples);
+    // 3. 判断是否达到5秒（16kHz * 5s * 通道数）
+    const int32 TargetSamples = 16000 * 5 * InNumChannels;
+    UE_LOG(LogTemp, Log, TEXT("AudioCache : %d / %d"), AudioCache.Num(), TargetSamples);
+    if (AudioCache.Num() >= TargetSamples && !bSaved)
+    {
+        AudioCache.SetNum(TargetSamples);
+
+        WriteWavFile(TEXT("D:/CapturedAudio.wav"), AudioCache, 16000, InNumChannels);
+
+        bSaved = true;
+        UE_LOG(LogTemp, Warning, TEXT("Saved first 5 seconds to WAV file!"));
+    }
 }
 
 void UUnrealVolcEngineSubsystem::Initialize(FSubsystemCollectionBase& Collection)
